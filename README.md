@@ -1,4 +1,4 @@
-# td_ansible_infra
+# Projet: Mettre à jour Automatiquement le Firmware d’un commutateur cisco 2960-X
 
 Ce playbook à était crée pour un switch 2960
 crée votre fichier inventaire sur votre machine ubuntu (ansible.ini)
