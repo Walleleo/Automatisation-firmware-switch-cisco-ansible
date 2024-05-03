@@ -1,0 +1,192 @@
+---
+# Ce playbook est destiné à mettre à jour la version de l'IOS sur les commutateurs Cisco.
+
+- name: Mettre à niveau CISCO IOS
+  hosts: switches  # Cible le groupe d'hôtes 'switches' défini dans le fichier d'inventaire "ansible.ini".
+  gather_facts: no
+
+  vars:
+    upgrade_ios_version: "15.2(7)E7"  # Définit la version du firmware actuel du switch.
+
+  tasks:
+    - name: Collecter les informations sur Cisco IOS
+      ios_facts:
+      register: iosinfo  # Enregistre les informations collectées dans la variable 'iosinfo'.
+
+
+    - name: Afficher la version actuelle d'iOS
+      debug: 
+        msg: "Current IOS version is {{ iosinfo.ansible_facts.ansible_net_version }}" #La tâche Ansible affiche la version actuelle d'iOS en utilisant "debug" pour imprimer le message
+
+    # Vérifie si la version actuelle de l'IOS correspond à la version cible.
+    - name: Vérifier si iOS nécessite une mise à jour.
+      debug:  # Affiche un message si une mise à jour est nécessaire.
+        msg: "IOS needs upgrade to version {{ upgrade_ios_version }}"
+      when: iosinfo.ansible_facts.ansible_net_version != upgrade_ios_version  # Condition pour vérifier la version.
+
+    # Met à jour l'IOS si la version actuelle ne correspond pas à la version cible.
+    - name: Mettre à jour iOS si nécessaire
+      ios_command:  # Exécute des commandes sur l'appareil Cisco.
+        commands:
+          - 'command to upload and install new IOS'  # La commande spécifique pour la mise à jour de l'IOS doit être ici.
+      when: iosinfo.ansible_facts.ansible_net_version != upgrade_ios_version  # Exécute seulement si la mise à jour est nécessaire.
+      become: yes
+      become_method: enable  # Utilise la méthode 'enable' pour les privilèges élevés.
+
+## Crée un dossier de sauvegarde pour la date du jour sur la machine locale
+
+- hosts: localhost
+  tasks:
+   - name: Informations sur la date et l'heure avec Ansible.  # Obtient les informations de date et d'heure actuelles d'Ansible
+     setup:
+       filter: "ansible_date_time"  # Filtre les informations pour ne récupérer que les données de date/heure
+       gather_subset: "!all"  # Evite de rassembler tous les faits par défaut, pour plus d'efficacité
+
+   - name: Stocker le DTG comme fait  # Stocker la date actuelle en tant que fait nommé DTG
+     set_fact:
+       DTG: "{{ ansible_date_time.date }}"  # Définit la variable DTG avec la date actuelle
+
+   - name: Create Directory {{hostvars.localhost.DTG}}  # Crée un répertoire avec la date actuelle
+     file:
+       path: ~/network-programmability/backups/{{hostvars.localhost.DTG}}  # Définit le chemin du nouveau répertoire
+       state: directory  # Assure que le chemin est un répertoire
+  run_once: true
+
+## Sauvegarde la configuration en cours des switches
+
+- hosts: switches
+
+  tasks:
+   - name: Sauvegarde la configuration en cours # Tâche pour sauvegarder la configuration en cours
+     ios_command:
+       commands: show run  # Exécute la commande 'show run' sur le switch pour obtenir la configuration
+     register: config  # Enregistre la sortie de la commande dans la variable 'config'
+
+   - name: Save output to ~/network-programmability/backups/  # Sauvegarde la sortie de la commande dans un fichier
+     copy:  # Utilise le module copy pour copier la sortie dans un fichier
+       content: "{{config.stdout[0]}}"  # Contenu à copier: première ligne de la sortie de la commande 'show run'
+       dest: "~/network-programmability/backups/{{hostvars.localhost.DTG}}/{{ inventory_hostname }}-{{hostvars.localhost.DTG}}-config.txt"  # Destination du fichier de sauvegarde
+
+## SAUVEGARDE de la configuration en cours
+
+   - name: Enregistre la configuration en cours  # Tâche pour sauvegarder définitivement la configuration en cours
+     ios_config:
+       save_when: always  # Option pour toujours sauvegarder la configuration
+
+- name: Copier le logiciel sur l'appareil cible
+  hosts: switches
+  gather_facts: no
+  tasks:
+    - name: Vérifier si l'image est déjà installée
+      ios_command:
+        commands: "dir flash:/ | include c2960x-universalk9-mz.152-7.E9.bin"
+      register: flash_content
+
+    - name: Afficher un message si le fichier est déjà présent
+      debug:
+        msg: "Le fichier firmware est déjà installé dans le flash."
+      when: "'c2960x-universalk9-mz.152-7.E9.bin' in flash_content.stdout[0]"
+
+    - name: Copier l'image si elle n'est pas déjà présente
+      net_put:
+        src: "/home/rt/network-programmability/images/c2960x-universalk9-mz.152-7.E9.bin"
+        dest: "flash:/c2960x-universalk9-mz.152-7.E9.bin"
+      vars:
+        ansible_command_timeout: 600
+      when: "'c2960x-universalk9-mz.152-7.E9.bin' not in flash_content.stdout[0]"
+
+
+## BOOT the new image
+- name: Changer la variable de boot pour la nouvelle image
+  hosts: switches  # Assurez-vous que ce groupe est défini dans votre inventaire
+  gather_facts: no
+
+  tasks:
+    - name: Change Boot Variable to new image
+      ios_config:
+        commands:
+          - "boot system flash:c2960x-universalk9-mz.152-7.E9.bin"
+        save_when: always
+        
+##Relancer le switch
+- name: Relancer le switch
+  cli_command:
+    command: reload
+    prompt:
+      - "confirm"
+    answer:
+      - 'y'
+  register: result
+
+- name: Afficher un message de confirmation
+  debug:
+    msg: "Le switch a été relancé avec succès."
+
+#ATTENTE DE LA CONNEXION DU SWITCH
+- name: Attendre la connectivité à l'appareil.
+  hosts: all  # Assurez-vous que ce groupe est défini dans votre inventaire
+  gather_facts: no
+
+  tasks:
+    - name: Attendez que l'appareil revienne en ligne.
+      wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 22
+        delay: 90  # Attendez 90 secondes avant de commencer à vérifier.
+      delegate_to: localhost
+
+
+## Check current image
+
+- name: Vérifier l'image actuelle.
+  hosts: all  # Assurez-vous que ce groupe est défini dans votre inventaire
+  gather_facts: no
+
+  tasks:
+    - name: Vérifier la version de l'image.
+      ios_facts:
+
+    - debug:
+        msg: "La version actuelle est {{ ansible_net_version }}"
+
+    - name: Affirmer que la version d'iOS est correcte.
+      vars:
+        upgrade_ios_version: "15.2(7)E9"
+      assert:
+        that:
+          - "upgrade_ios_version == ansible_net_version"
+        fail_msg: "La version d'iOS n'est pas correcte.."
+        success_msg: "La version d'iOS est correcte.."
+
+    - debug:
+        msg: "La mise à jour logicielle a été complétée."
+
+## SAUVEGARDE CONFIG DU SWITCH
+
+- name: Récupére la configuration et Afficher les commandes du commutateur Cisco 2960.
+  hosts: switches  # Assurez-vous que ce groupe est défini dans votre inventaire
+  gather_facts: no
+
+  tasks:
+    - name: Obtenir la configuration en cours du commutateur
+      ios_config:
+        backup: yes  # Crée une sauvegarde de la configuration en cours
+      register: config
+
+    - name: Affichez les informations de sauvegarde de la configuration.
+      debug:
+        msg: "La configuration en cours a été sauvegardée, le fichier de sauvegarde est {{ config.backup_path }}"
+
+    - name: Exécutez les commandes show sur le commutateur Cisco.
+      ios_command:
+        commands:
+          - "show etherchannel summary"
+          - "show cdp neighbors"
+          - "show cdp neighbors detail"
+          - "show version"
+          - "show ip interface brief | exc admin"
+      register: show_outputs
+
+    - name: Affichez le résultat des commandes show.
+      debug:
+        var: show_outputs.stdout_lines
